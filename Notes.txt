@@ -1,0 +1,7 @@
+# Pre-processings
+>>> Dropping irrelevant columns, e.g., nb of wagons
+>>> Reformatting date-time
+
+# Notes
+>>> For cancelled trains, date-time is inexistant, i.e., "Saknas"
+>>> Destination-station has "Sista" in column "UppehållstypAnkomst"
