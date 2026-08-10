@@ -1,152 +1,218 @@
+"""Metric and statistical utilities used by the case-study notebooks."""
 
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+
+import numpy as np
 import pandas as pd
 
-
-def get_OTP(df_traffic):
-    """
-    Calculate on-time performance based on traffic data (AVL).
-
-    Parameters:
-    df_traffic (DataFrame): The traffic data containing arrival and departure information.
-
-    Returns:
-    DataFrame: Filtered data with OTP calculations.
-    """
-
-    # Keep rows where UppehållstypAnkomst is "Sista", i.e., last arrival
-    df_OTP = df_traffic[df_traffic['UppehållstypAnkomst'] == 'Sista'].copy()
-
-    # Keep uncancelled trains (i.e., rows with 'N' in 'Inställtflagga')
-    df_OTP = df_OTP[df_OTP['Inställtflagga'] == 'N']
-
-    # Ensure 'Ankomsttid' and 'Planerad ankomsttid' are datetime types
-    df_OTP['Ankomsttid'] = pd.to_datetime(df_OTP['Ankomsttid'], errors='coerce')
-    df_OTP['Planerad ankomsttid'] = pd.to_datetime(df_OTP['Planerad ankomsttid'], errors='coerce')
-    df_OTP['Datum (PAU)'] = pd.to_datetime(df_OTP['Datum (PAU)'],errors='coerce')
-
-    # Drop rows where conversion failed (i.e., NaT values)
-    df_OTP = df_OTP.dropna(subset=['Ankomsttid', 'Planerad ankomsttid'])
-
-    # Calculate punctuality delay at the destination station (in seconds)
-    df_OTP['OTP_seconds'] = (df_OTP['Ankomsttid'] - df_OTP['Planerad ankomsttid']).dt.total_seconds()
-
-    return df_OTP
+from .constants import STATIONS_SOUTH_TO_NORTH, TIME_PERIODS_MINUTES
 
 
-    # Helper function to get direction
-    # -1 if going north
-    # +1 if going south
-def get_direction(from_station, to_station, stations_south_to_north):
-    if stations_south_to_north.index(from_station) < stations_south_to_north.index(to_station):
-        return -1
-    elif stations_south_to_north.index(from_station) > stations_south_to_north.index(to_station):
-        return 1
+def get_direction(
+    from_station: str,
+    to_station: str,
+    stations_south_to_north: Sequence[str] = STATIONS_SOUTH_TO_NORTH,
+) -> int:
+    """Return +1 northbound, -1 southbound, and 0 for a zero-length movement."""
+
+    positions = {station: position for position, station in enumerate(stations_south_to_north)}
+    try:
+        difference = positions[to_station] - positions[from_station]
+    except KeyError as exc:
+        raise ValueError(f"Unknown station code: {exc.args[0]!r}") from exc
+    return int(np.sign(difference))
+
+
+def get_OTP(
+    df_traffic: pd.DataFrame,
+    *,
+    include_cancellations: bool = False,
+) -> pd.DataFrame:
+    """Return destination-arrival delays while retaining cancellation provenance."""
+
+    arrival_type = (
+        "UppehållstypAnkomst"
+        if "UppehållstypAnkomst" in df_traffic
+        else "UppehallstypAnkomst"
+    )
+    actual_arrival = "Ankomsttid"
+    planned_arrival = (
+        "Planerad ankomsttid"
+        if "Planerad ankomsttid" in df_traffic
+        else "Planerad_ankomsttid"
+    )
+    date_column = "Datum (PAU)" if "Datum (PAU)" in df_traffic else "Datum"
+
+    result = df_traffic.loc[df_traffic[arrival_type] == "Sista"].copy()
+    if not include_cancellations and "Inställtflagga" in result:
+        result = result.loc[result["Inställtflagga"] == "N"].copy()
+
+    result[actual_arrival] = pd.to_datetime(result[actual_arrival], errors="coerce")
+    result[planned_arrival] = pd.to_datetime(result[planned_arrival], errors="coerce")
+    result[date_column] = pd.to_datetime(result[date_column], errors="coerce")
+    result["OTP_seconds"] = (
+        result[actual_arrival] - result[planned_arrival]
+    ).dt.total_seconds()
+    result["OTP_minutes"] = result["OTP_seconds"] / 60.0
+
+    if not include_cancellations:
+        result = result.dropna(subset=[actual_arrival, planned_arrival])
+    return result
+
+
+def clock_minutes(values: pd.Series) -> pd.Series:
+    """Convert datetimes to minutes after midnight, preserving missing values."""
+
+    datetimes = pd.to_datetime(values, errors="coerce")
+    return (
+        datetimes.dt.hour * 60
+        + datetimes.dt.minute
+        + datetimes.dt.second / 60.0
+    )
+
+
+def assign_time_period(
+    minutes: pd.Series,
+    periods: Mapping[str, tuple[float, float]] = TIME_PERIODS_MINUTES,
+) -> pd.Series:
+    """Assign half-open time periods such as 06:00 <= t < 09:00."""
+
+    result = pd.Series(pd.NA, index=minutes.index, dtype="string")
+    for label, (start, end) in periods.items():
+        result.loc[minutes.ge(start) & minutes.lt(end)] = label
+    return result
+
+
+def on_time_curve(
+    delays_minutes: pd.Series,
+    thresholds_minutes: Sequence[float],
+    *,
+    weights: pd.Series | None = None,
+    eligible: pd.Series | None = None,
+) -> np.ndarray:
+    """Compute a weighted empirical CDF of delays for exact thresholds."""
+
+    delay = pd.to_numeric(delays_minutes, errors="coerce")
+    valid = delay.notna() if eligible is None else eligible.fillna(False)
+    if weights is None:
+        weight = pd.Series(1.0, index=delay.index)
     else:
-        return 0
-        
+        weight = pd.to_numeric(weights, errors="coerce").fillna(0.0).clip(lower=0.0)
+    denominator = weight.loc[valid].sum()
+    if denominator <= 0:
+        return np.full(len(thresholds_minutes), np.nan)
+    return np.asarray(
+        [weight.loc[valid & delay.le(threshold)].sum() / denominator for threshold in thresholds_minutes],
+        dtype=float,
+    )
 
-def get_PP2_A_to_B(station_A, station_B, df_traffic, df_demand, delay_threshold=5, period='morning_peak'):
+
+def weighted_quantile(
+    values: Sequence[float] | pd.Series,
+    quantiles: Sequence[float],
+    sample_weight: Sequence[float] | pd.Series,
+) -> np.ndarray:
+    """Calculate weighted empirical quantiles for non-negative observation weights."""
+
+    value = np.asarray(values, dtype=float)
+    weight = np.asarray(sample_weight, dtype=float)
+    q = np.asarray(quantiles, dtype=float)
+    valid = np.isfinite(value) & np.isfinite(weight) & (weight > 0)
+    if not valid.any():
+        return np.full(q.shape, np.nan)
+    value = value[valid]
+    weight = weight[valid]
+    order = np.argsort(value, kind="mergesort")
+    value = value[order]
+    weight = weight[order]
+    cumulative = np.cumsum(weight) / weight.sum()
+    positions = np.searchsorted(cumulative, q, side="left")
+    positions = np.clip(positions, 0, len(value) - 1)
+    return value[positions]
+
+
+def ratio_confidence_interval_by_day(
+    daily: pd.DataFrame,
+    *,
+    numerator: str,
+    denominator: str,
+    draws: int = 2_000,
+    seed: int = 2024,
+) -> tuple[float, float, float]:
+    """Return estimate and a day-cluster bootstrap 95% interval for a ratio."""
+
+    data = daily[[numerator, denominator]].dropna()
+    data = data.loc[data[denominator] > 0]
+    if data.empty:
+        return np.nan, np.nan, np.nan
+    estimate = data[numerator].sum() / data[denominator].sum()
+    generator = np.random.default_rng(seed)
+    positions = generator.integers(0, len(data), size=(draws, len(data)))
+    numerator_samples = data[numerator].to_numpy()[positions].sum(axis=1)
+    denominator_samples = data[denominator].to_numpy()[positions].sum(axis=1)
+    samples = np.divide(
+        numerator_samples,
+        denominator_samples,
+        out=np.full(draws, np.nan),
+        where=denominator_samples > 0,
+    )
+    lower, upper = np.nanquantile(samples, [0.025, 0.975])
+    return float(estimate), float(lower), float(upper)
+
+
+def expected_waiting_time(
+    departures: pd.DataFrame,
+    *,
+    headway_column: str = "headway",
+    boarding_column: str = "n_boarding",
+) -> float:
+    """Passenger-weighted expected wait using one observation per departure.
+
+    With a piecewise-constant passenger arrival rate, this is
+    0.5 * sum(boardings_i * headway_i) / sum(boardings_i).
     """
-    Calculate PP2 on-time performance measure  based on traffic data (AVL) and passenger data.
 
-    Parameters:
-    df_traffic (DataFrame): The traffic data containing arrival and departure information.
-    df_demand (DataFrame): The demand data containing passenger ridership data.
-
-    Returns:
-    DataFrame: Filtered data with PP2 calculations.
-    """
-
-    # List of stations from Nyh to Bal
-    stations_order = ['Nyh', 'Gdv', 'Ngd', 'Öso', 'Ssä', 'Hfa', 'Ts', 'Kda', 'Vhe', 'Jbo', 'Hnd', 'Skg', 'Tåd', 'Fas', 'Äs', 'Åbe', 'Sst', 'Cst', 'Ke', 'Sub', 'Spå', 'Bkb', 'Jkb', 'Khä', 'Kän', 'Bro', 'Bål']
-    stations_order_upper = [station.upper() for station in stations_order]
-
-    # Morning peak time period between 6.00 and 9.00, every 15 minutes
-    t_first = 6 * 4
-    t_last = 9 * 4
-    # by default peak morning, otherwise off-peak 9.00 to 15.00
-    if(period != 'morning_peak'):
-        t_first = 9 * 4
-        t_last = 15 * 4
-    t_period = range(t_first, t_last)
-    
-    delay_threshold = delay_threshold * 60  # 5 minutes (by default) delay thresholds in seconds
-
-    # Calculate the total number of trips (T_total)
-    T_total = 0
-    for t in t_period:
-        T_total += df_demand[t][station_A][station_B]
-
-    # Copy of the traffic data, drop all the cancelled departures
-    df_PP2 = df_traffic[df_traffic['Inställtflagga'] == 'N'].copy()
-
-    # Departure day
-    dep_day = pd.to_datetime('2015-10-14')
-
-    df_PP2['Datum (PAU)'] = pd.to_datetime(df_PP2['Datum (PAU)'],errors='coerce')
-    df_PP2['Ankomsttid'] = pd.to_datetime(df_PP2['Ankomsttid'],errors='coerce')
-    df_PP2['Avgångstid'] = pd.to_datetime(df_PP2['Avgångstid'], errors='coerce')
-    df_PP2['Planerad ankomsttid'] = pd.to_datetime(df_PP2['Planerad ankomsttid'],errors='coerce')
-    df_PP2['Planerad avgångstid'] = pd.to_datetime(df_PP2['Planerad avgångstid'],errors='coerce')
-
-    # Calculate the promised trips (T_promised)
-    T_promised = 0
-    for t in t_period:
-        # Get number of passengers from A to B at time period t
-        nb_pass = df_demand[t][station_A][station_B]
-
-        # Filter all departures from A on the same departure day dep_day
-        df_demand_A_B_dep_day = df_PP2[(pd.to_datetime(df_PP2['Datum (PAU)']) == dep_day) & (df_PP2['Från platssignatur'] == station_A)]
-
-        # Drop departures in the other direction than from A to B
-        dir_A_B = get_direction(station_A, station_B, stations_order)
-        df_demand_A_B_dep_day = df_demand_A_B_dep_day[df_demand_A_B_dep_day.apply(lambda x: get_direction(x['Första platssignatur'], x['Sista platssignatur'].upper(), stations_order_upper) == dir_A_B, axis=1)]
-
-        # Drop departures not serving the arrival station B
-        df_demand_A_B_dep_day = df_demand_A_B_dep_day[df_demand_A_B_dep_day.apply(lambda x: get_direction(station_B.upper(), x['Sista platssignatur'].upper(), stations_order_upper)* dir_A_B>=0, axis=1)]
+    headway = pd.to_numeric(departures[headway_column], errors="coerce")
+    boardings = pd.to_numeric(departures[boarding_column], errors="coerce")
+    valid = headway.gt(0) & headway.notna() & boardings.gt(0) & boardings.notna()
+    if not valid.any():
+        return np.nan
+    return float(
+        0.5
+        * np.average(
+            headway.loc[valid].to_numpy(),
+            weights=boardings.loc[valid].to_numpy(),
+        )
+    )
 
 
-        # Drop all passed departures, happening earlier than t (+4 minutes for boarding/walking to the departure platform)
-        df_demand_A_B_dep_day = df_demand_A_B_dep_day[(df_demand_A_B_dep_day['Planerad avgångstid'].dt.hour * 4 + (df_demand_A_B_dep_day['Planerad avgångstid'].dt.minute - 4) / 15) > t]
+def get_PP2_A_to_B(
+    station_A: str,
+    station_B: str,
+    journeys: pd.DataFrame,
+    delay_threshold: float = 5.0,
+    period: str | None = None,
+) -> float:
+    """Calculate PP2 for an OD pair from the canonical passenger-journey table."""
 
-        # Sort the departures in terms of departure time
-        df_demand_A_B_dep_day_sorted = df_demand_A_B_dep_day.sort_values(by=['Planerad avgångstid'])
-
-        if not df_demand_A_B_dep_day_sorted.empty:
-            # Get the closest next scheduled/promised departure from A
-            promised_departure_row = df_demand_A_B_dep_day_sorted.iloc[0]
-
-            # Find the corresponding promised/scheduled arrival time to B using Tåguppdrag
-            promised_train_arrival = df_PP2[(df_PP2['Tåguppdrag'] == promised_departure_row['Tåguppdrag']) & (df_PP2['Till platssignatur'] == station_B)]
-            promised_arrival_time = promised_train_arrival['Planerad ankomsttid'].values[0] if not promised_train_arrival.empty else None
-
-            if promised_arrival_time is not None:
-                # Find the actual departure and arrival times
-                actual_departure_time = promised_departure_row['Avgångstid']
-                actual_arrival_time = promised_train_arrival['Ankomsttid'].values[0] if not promised_train_arrival.empty else None
-
-                if actual_departure_time == 'Saknas -':  # departure is cancelled
-                    df_demand_A_B_dep_day_sorted = df_demand_A_B_dep_day_sorted[df_demand_A_B_dep_day_sorted['Avgångstid'] != 'Saknas -']
-                    # Find the next uncancelled departure
-                    if not df_demand_A_B_dep_day_sorted.empty:
-                        next_departure_row = df_demand_A_B_dep_day_sorted.iloc[0]
-                        actual_departure_time = next_departure_row['Avgångstid']
-                        # Find the corresponding arrival
-                        promised_train_arrival = df_PP2[(df_PP2['Tåguppdrag'] == next_departure_row['Tåguppdrag']) & (df_PP2['Till platssignatur'] == station_B)]
-                        actual_arrival_time = promised_train_arrival['Ankomsttid'].values[0] if not promised_train_arrival.empty else None
-
-                if actual_arrival_time is not None:
-                    # Calculate the eventual delay in the arrival
-                    delay = (pd.to_datetime(actual_arrival_time) - pd.to_datetime(promised_arrival_time)).total_seconds()
-                    print(delay)
-                    
-                    # Accumulate if delay within threshold
-                    if delay <= delay_threshold:
-                        T_promised += nb_pass
-
-    # Calculate the punctuality measure PP2
-    PP2 = T_promised / T_total if T_total > 0 else None
-    print(f'PP2 = {PP2}')
-
-
-    return PP2
+    required = {"origin", "destination", "passengers", "arrival_delay_minutes"}
+    missing = required.difference(journeys.columns)
+    if missing:
+        raise ValueError(
+            "get_PP2_A_to_B now expects the canonical journey table; "
+            f"missing columns: {sorted(missing)}"
+        )
+    selection = journeys.loc[
+        journeys["origin"].eq(station_A) & journeys["destination"].eq(station_B)
+    ]
+    if period is not None:
+        selection = selection.loc[selection["period"].eq(period)]
+    weight = selection["passengers"].clip(lower=0.0)
+    if weight.sum() <= 0:
+        return np.nan
+    return float(
+        weight.loc[selection["arrival_delay_minutes"].le(delay_threshold)].sum()
+        / weight.sum()
+    )

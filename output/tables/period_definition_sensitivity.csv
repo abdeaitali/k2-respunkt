@@ -1,0 +1,25 @@
+variant,period,metric,score
+"Report code: all days, legacy arrival-hour bins",Morning peak,OTP,90.25487256371814
+"Report code: all days, legacy arrival-hour bins",Morning peak,PP2,88.38782041053486
+"Report code: all days, legacy arrival-hour bins",Midday off-peak,OTP,96.25
+"Report code: all days, legacy arrival-hour bins",Midday off-peak,PP2,94.18090869465173
+"Report code: all days, legacy arrival-hour bins",Afternoon peak,OTP,87.96033994334277
+"Report code: all days, legacy arrival-hour bins",Afternoon peak,PP2,84.89468971981283
+"All days, corrected arrival-time bins",Morning peak,OTP,91.23076923076923
+"All days, corrected arrival-time bins",Morning peak,PP2,87.91806603567336
+"All days, corrected arrival-time bins",Midday off-peak,OTP,96.06986899563319
+"All days, corrected arrival-time bins",Midday off-peak,PP2,94.96353383746279
+"All days, corrected arrival-time bins",Afternoon peak,OTP,89.41717791411043
+"All days, corrected arrival-time bins",Afternoon peak,PP2,86.30466273330578
+"Weekdays, corrected arrival-time bins",Morning peak,OTP,89.24528301886792
+"Weekdays, corrected arrival-time bins",Morning peak,PP2,83.72711727184786
+"Weekdays, corrected arrival-time bins",Midday off-peak,OTP,95.48022598870057
+"Weekdays, corrected arrival-time bins",Midday off-peak,PP2,94.09203095103463
+"Weekdays, corrected arrival-time bins",Afternoon peak,OTP,87.90786948176583
+"Weekdays, corrected arrival-time bins",Afternoon peak,PP2,83.93977256678097
+"Weekdays, scheduled service-start cohort",Morning peak,OTP,88.8689407540395
+"Weekdays, scheduled service-start cohort",Morning peak,PP2,83.96259811120512
+"Weekdays, scheduled service-start cohort",Midday off-peak,OTP,94.68713105076742
+"Weekdays, scheduled service-start cohort",Midday off-peak,PP2,92.75621733642312
+"Weekdays, scheduled service-start cohort",Afternoon peak,OTP,87.17504332755632
+"Weekdays, scheduled service-start cohort",Afternoon peak,PP2,82.81702953809753

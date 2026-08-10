@@ -1,0 +1,14 @@
+measure,value,unit
+Raw calendar days,35.0,days
+Raw weekend days,10.0,days
+Corrected workday cohort,25.0,days
+Planned terminal services,4132.0,services
+Cancelled terminal services,406.0,services
+Terminal cancellation rate,9.825750242013553,percent
+Actual movements,68501.0,movements
+Imputed movement arrivals,1810.0,movements
+Imputed movement-arrival rate,2.642297192741712,percent
+Imputed terminal arrivals,25.0,services
+Suspect arrivals (>10 min early),1.0,movements
+Assigned actual passengers,2596036.916243625,passenger trips
+Assigned planned passengers,2684346.425080886,passenger trips

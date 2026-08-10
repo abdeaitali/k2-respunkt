@@ -1,97 +1,83 @@
+"""Filter a full Trafikverket traffic export to the Bål-Nyh case-study line."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
 import pandas as pd
-import csv
-import codecs # helps avoid getting "_csv.Error: line contains NUL"
+
+from .constants import STATIONS_SOUTH_TO_NORTH
 
 
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-#   Filters obs. between Nyh-Bål from all raw traffic data
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+def filter_raw_traffic(
+    input_file: str | Path,
+    output_file: str | Path,
+    *,
+    start_date: str = "2015-09-14",
+    end_date: str = "2015-10-18",
+    chunksize: int = 1_000_000,
+) -> Path:
+    """Stream-filter passenger trains whose task endpoints are on the line."""
 
- 
-# initializing the titles and rows list and line counter
-# col 1 - tåguppdrag
-# col 2 - tågnr
-# col 3  {"Tågordning uppdrag", Int64.Type}
-# col 4 - {"Datum (PAU)", type date}
-# col 5 - {"Tågslag", type text}
-# col 6 - {"UppehållstypAvgång", type text}
-# col 7 - {"UppehållstypAnkomst", type text}
-# col 8 - {"Delsträckanummer", Int64.Type}
-# col 9 - {"Första platssignatur", type text}
-# col 10 - {"Första platssignatur för uppdrag", type text}
-# col 11 - {"Sista platssignatur", type text}
-# col 12 - {"Sista platssignatur för uppdrag", type text}
+    source = Path(input_file).expanduser().resolve()
+    target = Path(output_file).expanduser().resolve()
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    target.parent.mkdir(parents=True, exist_ok=True)
 
-# col 13 - {"Avgångsplats", type text}
-# col 14 - {"Från platssignatur", type text}
-
-# col 15 - {"Ankomstplats", type text}
-# col 16 - {"Till platssignatur", type text}
-# col 17 - {"Sträcka med riktning", type text}
-# col 18 - {"Inställelseorsakskod", type text}
-# col 19 - {"Inställelseorsak", type text}, 
-# 20 {"Ankomsttid", type text}, 
-# 21 {"Avgångstid", type text}
-# 22 {"Planerad ankomsttid", type datetime}, 
-# 23 {"Planerad avgångstid", type datetime}, 
-# 24 {"Dragfordonsid", type text}, 
-# 25 {"Framförda tågkm", type text}, 
-# 26 {"Rapporterad tågvikt", type text}, 
-# 27 {"Rapporterad tåglängd", type text}, 
-# 28 {"Antal rapporterade vagnar", Int64.Type}, 
-# 29 {"Antal rapporterade hjulaxlar", Int64.Type}, 
-# 30 {"Inställtflagga", type text},
-# 31 {"Planeringsstatus", type text}})
-
-#RST	Persontrafik	Tågfärd	Resandetåg
-#GT	Godstrafik	Tågfärd	Godståg
-#TJT	Tjänstetåg	Tågfärd	Tjänstetåg
-#SPF	Godstrafik	Spärrfärd	Vagnuttagning
-#VXR	Tjänstetåg	Växling	Växling
-
-# Input and output file names
-input_filename = 'C:/Users/AbdouAA/Work Folders/Documents/GitHub/k2-respunkt/data/VTI_20150101_20151231_TrafikJVG.csv'
-output_filename = 'C:/Users/AbdouAA/Work Folders/Documents/GitHub/k2-respunkt/data/RST_2015_v38_42.csv'
-
-# List of stations from Nyh to Bal
-stations_order = ['Nyh', 'Gdv', 'Ngd', 'Öso', 'Ssä', 'Hfa', 'Ts', 'Kda', 'Vhe', 'Jbo', 'Hnd', 'Skg', 'Tåd', 'Fas', 'Äs', 'Åbe', 'Sst', 'Cst', 'Ke', 'Sub', 'Spå', 'Bkb', 'Jkb', 'Khä', 'Kän', 'Bro', 'Bål']
-
-# Convert stations_order to uppercase
-stations_order_upper = [station.upper() for station in stations_order]
-
-# Define the chunk size
-chunksize = 10**6
-
-# Define the date range for weeks 38 to 42 in 2015
-start_date = pd.to_datetime('2015-09-14')  # Start of week 38
-end_date = pd.to_datetime('2015-10-18')    # End of week 42
-
-# Initialize the CSV writer
-with open(output_filename, 'w', newline='', encoding='utf-8') as output_file:
-    writer = None
-
-    # Process the CSV file in chunks
-    for chunk in pd.read_csv(input_filename, chunksize=chunksize, delimiter=';', on_bad_lines='skip'):
-        # Filter rows where column 4 ("Datum (PAU)") is within the specified date range
-        chunk['Datum (PAU)'] = pd.to_datetime(chunk.iloc[:, 3], errors='coerce')
-        date_filtered_chunk = chunk[(chunk['Datum (PAU)'] >= start_date) & (chunk['Datum (PAU)'] <= end_date)]
-        
-        # Filter rows where column 5 ("Tågslag") is "RST"
-        rst_filtered_chunk = date_filtered_chunk[date_filtered_chunk.iloc[:, 4] == 'RST']
-
-        if(len(rst_filtered_chunk)>10):
-            len(rst_filtered_chunk)
-            
-        # Further filter rows where either column 8 ("Första platssignatur") or column 10 ("Sista platssignatur") is in stations_order_lower
-        final_filtered_chunk = rst_filtered_chunk[
-            rst_filtered_chunk.iloc[:, 8].isin(stations_order_upper) & rst_filtered_chunk.iloc[:, 10].isin(stations_order_upper)
+    station_codes = {station.upper() for station in STATIONS_SOUTH_TO_NORTH}
+    start = pd.Timestamp(start_date)
+    end = pd.Timestamp(end_date)
+    wrote_header = False
+    for chunk in pd.read_csv(source, sep=";", chunksize=chunksize, low_memory=False):
+        required = {
+            "Datum (PAU)",
+            "Tågslag",
+            "Första platssignatur",
+            "Sista platssignatur",
+        }
+        missing = required.difference(chunk.columns)
+        if missing:
+            raise ValueError(f"Raw export is missing columns: {sorted(missing)}")
+        dates = pd.to_datetime(chunk["Datum (PAU)"], errors="coerce")
+        selected = chunk.loc[
+            dates.between(start, end, inclusive="both")
+            & chunk["Tågslag"].eq("RST")
+            & chunk["Första platssignatur"].str.upper().isin(station_codes)
+            & chunk["Sista platssignatur"].str.upper().isin(station_codes)
         ]
+        if selected.empty:
+            continue
+        selected.to_csv(
+            target,
+            sep=";",
+            mode="a" if wrote_header else "w",
+            header=not wrote_header,
+            index=False,
+        )
+        wrote_header = True
+    if not wrote_header:
+        raise ValueError("No rows matched the requested filters")
+    return target
 
-        # Write the filtered chunk to the output file
-        if writer is None:
-            # Write the header in the first chunk
-            final_filtered_chunk.to_csv(output_filename, mode='w', header=True, index=False, sep=';')
-            writer = True
-        else:
-            # Append the subsequent chunks without the header
-            final_filtered_chunk.to_csv(output_filename, mode='a', header=False, index=False, sep=';')
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("input_file", type=Path)
+    parser.add_argument("output_file", type=Path)
+    parser.add_argument("--start-date", default="2015-09-14")
+    parser.add_argument("--end-date", default="2015-10-18")
+    args = parser.parse_args()
+    print(
+        filter_raw_traffic(
+            args.input_file,
+            args.output_file,
+            start_date=args.start_date,
+            end_date=args.end_date,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

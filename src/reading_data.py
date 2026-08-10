@@ -1,42 +1,94 @@
+"""Portable, validated readers for the project data files."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Iterable
+
 import pandas as pd
 
 
-######################
-##  Reading traffic data
-#######################
-def get_traffic_data():
-    input_file = 'C:/Users/AbdouAA/Work Folders/Documents/GitHub/k2-respunkt/data/RST_2015_v38_42.csv'
-    traffic_data = pd.read_csv(input_file, delimiter=';')
-    return traffic_data
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DATA_DIR = PROJECT_ROOT / "data"
+VISUALISATION_DIR = PROJECT_ROOT / "vizualisation"
 
 
-######################
-##  Reading demand data
-#######################
-def get_demand_data():
-    # load dataset
-    input_file = 'C:/Users/AbdouAA/Work Folders/Documents/GitHub/k2-respunkt/data/OD_data_dynamic.xlsx'
-    df_static = pd.read_excel(input_file, sheet_name='Static', index_col=0, header=0)
+def _existing_path(path: str | Path | None, default: Path) -> Path:
+    resolved = Path(path) if path is not None else default
+    resolved = resolved.expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"Data file not found: {resolved}")
+    return resolved
 
-    # Extract headers and index from the static data
-    headers = df_static.columns
-    index = df_static.index
 
-    # Number of time periods (every 15 minutes during a full day)
-    nb_time_periods = int(24 * 60 / 15)  # 96 periods
+def get_traffic_data(
+    input_file: str | Path | None = None,
+    *,
+    parse_dates: bool = False,
+) -> pd.DataFrame:
+    """Read the filtered 2015 AVL extract without relying on a user path."""
 
-    # Initialize a dictionary to store DataFrames for each time period
-    df_sheets = {}
+    path = _existing_path(input_file, DATA_DIR / "RST_2015_v38_42.csv")
+    data = pd.read_csv(path, sep=";", low_memory=False)
+    if parse_dates:
+        for column in [
+            "Datum (PAU)",
+            "Ankomsttid",
+            "Avgångstid",
+            "Planerad ankomsttid",
+            "Planerad avgångstid",
+        ]:
+            data[column] = pd.to_datetime(data[column], errors="coerce")
+    return data
 
-    # Read specific sheets by index
-    for t in range(nb_time_periods):
-        sheet_name = f"Sheet{t+1}"  # Assuming sheet names are "Sheet1", "Sheet2", ..., "Sheet96"
-        df_temp = pd.read_excel(input_file, sheet_name=sheet_name, header=None)  # Read without headers
-        
-        # Assign the headers and index from the static data
-        df_temp.columns = headers
-        df_temp.index = index
-        
-        # Store the DataFrame in the dictionary
-        df_sheets[t] = df_temp
-    return df_sheets
+def get_demand_data(
+    input_file: str | Path | None = None,
+    *,
+    periods: Iterable[int] = range(96),
+) -> dict[int, pd.DataFrame]:
+    """Read the 15-minute OD matrices and restore their station labels."""
+
+    path = _existing_path(input_file, DATA_DIR / "OD_data_dynamic.xlsx")
+    requested = list(periods)
+    with pd.ExcelFile(path, engine="openpyxl") as workbook:
+        static = pd.read_excel(workbook, sheet_name="Static", index_col=0, header=0)
+        sheets: dict[int, pd.DataFrame] = {}
+        for period in requested:
+            sheet_name = f"Sheet{period + 1}"
+            if sheet_name not in workbook.sheet_names:
+                raise ValueError(f"Missing demand sheet {sheet_name!r} in {path.name}")
+            matrix = pd.read_excel(workbook, sheet_name=sheet_name, header=None)
+            matrix = matrix.iloc[: len(static.index), : len(static.columns)].copy()
+            if matrix.shape != static.shape:
+                raise ValueError(
+                    f"{sheet_name} has shape {matrix.shape}; expected {static.shape}"
+                )
+            matrix.index = static.index
+            matrix.columns = static.columns
+            sheets[period] = matrix.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    return sheets
+
+
+def get_onboard_data(
+    kind: str = "actual",
+    input_file: str | Path | None = None,
+) -> pd.DataFrame:
+    """Read a derived passenger-on-board table with datetime columns parsed."""
+
+    if kind not in {"actual", "planned"}:
+        raise ValueError("kind must be 'actual' or 'planned'")
+    path = _existing_path(
+        input_file,
+        VISUALISATION_DIR / f"df_onboard_{kind}.csv",
+    )
+    data = pd.read_csv(path, low_memory=False)
+    for column in [
+        "Datum",
+        "Ankomsttid",
+        "Avgangstid",
+        "Planerad_ankomsttid",
+        "Planerad_avgangstid",
+    ]:
+        if column in data:
+            data[column] = pd.to_datetime(data[column], errors="coerce")
+    return data
